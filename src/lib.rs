@@ -27,20 +27,25 @@ lazy_static! {
     };
 }
 
+/// Returns the icon ID for a file, matching its file name first, then its extension.
+///
+/// Returns `None` when there is no match or when the path has no file name (e.g. `""`, `"/"`, `".."`).
 pub fn get_icon_for_file(path: impl AsRef<Path>) -> Option<u64> {
     let path = path.as_ref();
-    let basename = path.file_name().unwrap();
+    let basename = path.file_name()?;
 
     FILENAME_ICONS.get(basename.as_bytes()).or_else(|| {
-        let ext = path.extension().unwrap();
+        let ext = path.extension()?;
 
         EXT_ICONS.get(ext.as_bytes())
     })
 }
 
+/// Returns the icon ID for a folder, matching its name.
+///
+/// Returns `None` when there is no match or when the path has no file name (e.g. `""`, `"/"`, `".."`).
 pub fn get_icon_for_folder(path: impl AsRef<Path>) -> Option<u64> {
-    let path = path.as_ref();
-    let basename = path.file_name().unwrap();
+    let basename = path.as_ref().file_name()?;
 
     FOLDER_ICONS.get(basename.as_bytes())
 }
@@ -69,5 +74,19 @@ mod test {
         assert_eq!(get_icon_for_folder("./.github"), Some(862));
         assert_eq!(get_icon_for_folder("./src"), Some(1054));
         assert_eq!(get_icon_for_folder("./tests"), Some(1084));
+    }
+
+    #[test]
+    fn paths_without_file_name_return_none() {
+        for path in ["", "/", ".", ".."] {
+            assert_eq!(get_icon_for_file(path), None, "file {path:?}");
+            assert_eq!(get_icon_for_folder(path), None, "folder {path:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_file_without_extension_returns_none() {
+        assert_eq!(get_icon_for_file("foo"), None);
+        assert_eq!(get_icon_for_file("../../etc/passwd"), None);
     }
 }
