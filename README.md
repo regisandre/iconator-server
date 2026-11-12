@@ -16,3 +16,33 @@ This repository contains a simple file-icon lookup library as may be used by IDE
 Keep your audience in mind. We’re not interested in a perfect solution but one where we see your thought-process and working style in action.
   
 You may add these notes at the end of this file if you wish.
+
+## Solution
+
+An HTTP server lives in `src/bin/iconator-server.rs`. Design and production notes are in [DESIGN.md](DESIGN.md).
+
+### Run
+
+```sh
+cargo run --release --bin iconator-server   # listens on 0.0.0.0:8080
+HOST=127.0.0.1 PORT=3000 RUST_LOG=debug cargo run --bin iconator-server
+```
+
+### Query
+
+```sh
+curl 'http://localhost:8080/icons/file?path=src/main.rs'    # 200 {"icon_id":525}
+curl 'http://localhost:8080/icons/folder?path=.github'      # 200 {"icon_id":862}
+curl 'http://localhost:8080/icons/file?path=foo'            # 404 {"error":"not_found"}
+curl 'http://localhost:8080/icons/file?path=..'             # 400 {"error":"invalid_path","message":"..."}
+curl 'http://localhost:8080/health'                         # 200 {"status":"ok"}
+```
+
+### Check
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo audit
+```
