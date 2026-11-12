@@ -1,3 +1,8 @@
+#![allow(
+    clippy::large_const_arrays,
+    reason = "generated lookup tables, only read once at build time"
+)]
+
 use fst::Map;
 use std::path::Path;
 use std::{env, fs};
