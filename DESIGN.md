@@ -2,49 +2,54 @@
 
 ## Architecture
 
-The server is a binary (`src/bin/iconator-server.rs`) in the same package as the library. The lookup tables are already compiled into the library, so a separate crate or a workspace would add ceremony without protecting any boundary.
+One package: the library, plus the server as a binary in `src/bin/iconator-server.rs`. The
+tables are compiled into the library, so a second crate would add ceremony without protecting
+any boundary.
 
-- **axum 0.8 on tokio**, with **tower-http** for request tracing, a 5 s timeout and a 16 KiB body limit. Axum is the default choice on the tokio/tower stack: typed extractors, `Json` and `IntoResponse` keep the handlers small.
-- A two-variant `ApiError` enum implementing `IntoResponse` maps every failure to a JSON body; **anyhow** is used only in `main` (invalid `PORT`, bind failure). With two variants and no error chaining, `thiserror` would add a dependency without adding clarity.
-- Configuration through `HOST` (default `0.0.0.0`), `PORT` (default `8080`) and `RUST_LOG` (default `info`).
+- **axum 0.8 on tokio**, the default on the tokio/tower stack: typed extractors, `Json` and
+  `IntoResponse` keep each handler to a few lines, and tower-http's `TraceLayer` logs requests.
+- **Errors**: an `ApiError` enum turns every failure into a JSON body, including the query
+  strings axum itself rejects. `anyhow` only appears in `main` (bad `PORT`, bind failure).
+- **Tests** go through the router with `tower::ServiceExt::oneshot`, no open port needed.
 
-## API
+## Library fixes
 
-| Request | Response |
-| --- | --- |
-| `GET /icons/file?path=src/main.rs` | `200 {"icon_id":525}` |
-| `GET /icons/folder?path=.github` | `200 {"icon_id":862}` |
-| no icon for that name | `404 {"error":"not_found"}` |
-| missing, empty, > 4096 bytes, NUL byte, no file name (`/`, `.`, `..`) | `400 {"error":"invalid_path","message":"..."}` |
-| `GET /health` | `200 {"status":"ok"}` |
+The server is only as right as the lookups, so I fixed the library first.
+
+- **Matching.** The table comes from vscode-icons, and VS Code lowercases
+  [names](https://github.com/microsoft/vscode/blob/223c263c8bf610f045e3aad647c8eb3fc4774272/src/vs/editor/common/services/getIconClasses.ts)
+  and [theme keys](https://github.com/microsoft/vscode/blob/223c263c8bf610f045e3aad647c8eb3fc4774272/src/vs/workbench/services/themes/browser/fileIconThemeData.ts),
+  then tries every dotted suffix, longest first (see the README). The library compared raw
+  bytes and used `Path::extension()`, so `Cargo.toml` got the TOML icon (630, not 85),
+  `README.MD` got nothing and `index.d.ts` got TypeScript (633, not 618). 76 of the 711
+  extension keys contain a dot and could never match.
+- **Robustness.** No more panics on `""`, `/`, `..` or `foo`; `expect` instead of
+  `unsafe { unwrap_unchecked() }` (it runs once per map); the build script reruns when the
+  table changes and fails if a key points to two icons.
+- **Portability.** `LazyLock` replaces `lazy_static`, and `as_encoded_bytes()` replaces the
+  Unix-only `OsStrExt`, so it also builds on Windows and macOS.
 
 ## Tradeoffs
 
-- **Query parameter, not a path segment**: inputs are file paths and contain slashes; `?path=` avoids catch-all routes and encoding ambiguities.
-- **404 rather than `200 {"icon_id": null}`**: a miss is visible from the status code alone; the client falls back to its default icon either way.
-- **IDs only, no SVG**: this matches the library's contract. Clients (IDEs) are expected to ship or cache the icon set; serving `icons/*.svg` would be a separate static-file concern, ideally on a CDN.
-- **No filesystem access**: the library only looks at the last path component and the extension, so `../../etc/passwd` is just a lookup of `passwd`. Path traversal is not a risk; the server still bounds the input size.
-- **Library fix**: `get_icon_for_file` / `get_icon_for_folder` used `unwrap()` on `file_name()` and `extension()`, which panicked on `""`, `/`, `..` or an unknown name without extension such as `foo`. They now return `None` (two `?`), with regression tests. Lookup rules are unchanged. I kept `lazy_static` (clippy pedantic suggests `LazyLock`) to keep the diff focused.
-- **Unix-only**, because the library already relies on `OsStrExt`.
-- Tests call the router with `tower::ServiceExt::oneshot`, so they need no open port.
+- **`?path=`**, not a path segment: inputs contain slashes, and a query avoids catch-all routes.
+- **404 for a miss**, not `200 {"icon_id": null}`: the client shows its default icon either way.
+- **IDs only**, as the library returns. The SVGs are a static-file job for a CDN.
+- **No filesystem access**: `../../etc/passwd` is a lookup of `passwd`. Input is capped at 4096 bytes.
+- **No body limit or timeout in the app**: GET only, answered from memory. Those belong to the proxy.
+- **Cacheable**: a build always gives the same answer, so hits carry `max-age=86400`.
+- **Left out**: a batch endpoint. An IDE opening 500 files sends 500 requests; I would add
+  `POST /icons` once traffic shows it matters. Clients should send `/` separators, since a
+  Linux server reads `C:\src\Cargo.toml` as one name.
 
 ## Production
 
-- **Packaging**: a multi-stage Docker image, built with `cargo build --release --locked` in `rust:1-slim`, then the binary copied into `gcr.io/distroless/cc-debian12:nonroot` (small image, no shell, non-root user). Roughly:
-
-  ```dockerfile
-  FROM rust:1-slim AS build
-  WORKDIR /app
-  COPY . .
-  RUN cargo build --release --locked --bin iconator-server
-
-  FROM gcr.io/distroless/cc-debian12:nonroot
-  COPY --from=build /app/target/release/iconator-server /iconator-server
-  ENV PORT=8080
-  EXPOSE 8080
-  ENTRYPOINT ["/iconator-server"]
-  ```
-- **Running**: the service is stateless and lookups are in memory, so it scales horizontally behind any load balancer (Cloud Run, Fly.io, Kubernetes). `/health` serves liveness/readiness probes, and the process shuts down gracefully on `SIGTERM`, finishing in-flight requests.
-- **Caching**: a given path always maps to the same icon for a given build, so successful responses carry `Cache-Control: public, max-age=86400` and can sit behind a CDN.
-- **Observability**: structured logs through `tracing` and `TraceLayer`. Next steps: JSON logs, request IDs, Prometheus metrics (latency, status codes, hit/miss ratio); rate limiting and TLS at the proxy.
-- **CI**: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo audit`, then the image build.
+- **Image**: the `Dockerfile` builds on `rust:1-slim-bookworm` and runs on
+  `gcr.io/distroless/cc-debian12:nonroot` (no shell, non-root). Same Debian release on both
+  sides, so the binary never needs a newer glibc than the runtime has.
+- **Running**: stateless and in memory, so it scales horizontally (Cloud Run, Fly.io,
+  Kubernetes). `/health` serves the probes, and `SIGTERM` drains in-flight requests. TLS, rate
+  limits and timeouts sit at the proxy; a CDN can cache the responses.
+- **Observability**: `tracing` logs today. Next: JSON logs, request IDs, Prometheus metrics for
+  latency, status codes and hit/miss ratio, which shows the names the table is missing.
+- **CI** (`.github/workflows/ci.yml`): fmt, clippy `-D warnings`, tests, image build. Next:
+  `cargo deny` for advisories and licences.

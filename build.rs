@@ -3,26 +3,41 @@
     reason = "generated lookup tables, only read once at build time"
 )]
 
+use std::{env, fs, path::Path};
+
 use fst::Map;
-use std::path::Path;
-use std::{env, fs};
 
 include!("./icons/lookup_table.rs");
 
 fn main() {
-    let out_dir = env::var_os("OUT_DIR").unwrap();
+    // A build script that emits `rerun-if-changed` is only rerun for the listed paths (and for
+    // changes to itself), so the table has to be listed or editing it would not rebuild the maps.
+    println!("cargo::rerun-if-changed=icons/lookup_table.rs");
 
-    let ext_icons_path = Path::new(&out_dir).join("ext_icons.bin");
-    let ext_icons = Map::from_iter(EXT_ICONS).unwrap();
-    fs::write(ext_icons_path, ext_icons.into_fst().as_bytes()).unwrap();
+    let out_dir = env::var_os("OUT_DIR").expect("cargo sets OUT_DIR");
+    let out_dir = Path::new(&out_dir);
+    write_map(out_dir, "ext_icons.bin", &EXT_ICONS);
+    write_map(out_dir, "filename_icons.bin", &FILENAME_ICONS);
+    write_map(out_dir, "folder_icons.bin", &FOLDER_ICONS);
+}
 
-    let filename_icons_path = Path::new(&out_dir).join("filename_icons.bin");
-    let filename_icons = Map::from_iter(FILENAME_ICONS).unwrap();
-    fs::write(filename_icons_path, filename_icons.into_fst().as_bytes()).unwrap();
+/// Writes `entries` as an fst map keyed by the lowercased name, which is how `src/lib.rs` looks
+/// names up. fst needs sorted, unique keys, so identical pairs are merged and a key mapped to two
+/// different icons fails the build.
+fn write_map(out_dir: &Path, file_name: &str, entries: &[(&str, u64)]) {
+    let mut entries: Vec<(String, u64)> = entries
+        .iter()
+        .map(|&(key, icon)| (key.to_ascii_lowercase(), icon))
+        .collect();
+    entries.sort_unstable();
+    entries.dedup();
+    if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+        panic!(
+            "{file_name}: `{}` maps to icons {} and {}",
+            pair[0].0, pair[0].1, pair[1].1
+        );
+    }
 
-    let folder_icons_path = Path::new(&out_dir).join("folder_icons.bin");
-    let folder_icons = Map::from_iter(FOLDER_ICONS).unwrap();
-    fs::write(folder_icons_path, folder_icons.into_fst().as_bytes()).unwrap();
-
-    println!("cargo:rerun-if-changed=build.rs");
+    let map = Map::from_iter(entries).expect("keys are sorted and unique");
+    fs::write(out_dir.join(file_name), map.as_fst().as_bytes()).expect("OUT_DIR is writable");
 }
